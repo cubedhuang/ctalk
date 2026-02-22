@@ -9,8 +9,8 @@
 
 #define print_basic_usage()                                                    \
   fprintf(stderr,                                                              \
-          ANSI_BOLD ANSI_BRIGHT_CYAN "usage: " ANSI_RESET ANSI_GREEN           \
-                                     "%s <serve|join>\n",                      \
+          ANSI_BOLD ANSI_BCYAN "usage: " ANSI_RESET ANSI_GREEN                 \
+                               "%s <serve|join>\n",                            \
           argv[0])
 
 static struct option long_options[] = {
@@ -33,25 +33,25 @@ int handle_join(int argc, char *argv[static argc]) {
     case 'p':
       port = atoi(optarg);
       if (port < 0 || port > UINT16_MAX) {
-        print_err("invalid port '%s'", optarg);
+        log_err(NULL, "invalid port '%s'\n", optarg);
         return 1;
       }
       break;
     case '?':
-      print_err("unknown option '-%c'", optopt);
+      log_err(NULL, "unknown option '-%c'\n", optopt);
       return 1;
     case ':':
-      print_err("missing argument after '-%c'", optopt);
+      log_err(NULL, "missing argument after '-%c'\n", optopt);
       return 1;
     }
   }
 
   if (!host) {
-    print_err("missing required option '-h' or '--host'");
+    log_err(NULL, "missing required option '-h' or '--host'\n");
     return 1;
   }
   if (port == -1) {
-    print_err("missing required option '-p' or '--port'");
+    log_err(NULL, "missing required option '-p' or '--port'\n");
     return 1;
   }
 

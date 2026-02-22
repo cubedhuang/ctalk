@@ -23,36 +23,6 @@ typedef struct {
 static client_context_t *clients[MAX_CLIENTS + 1];
 static pthread_mutex_t clients_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static void main_log(const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  printf(ANSI_BOLD ANSI_BRIGHT_GREEN "log " ANSI_RESET);
-  vprintf(fmt, args);
-  va_end(args);
-}
-
-static void client_log(client_context_t *ctx, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  printf(ANSI_BOLD ANSI_BRIGHT_CYAN "%s:%u " ANSI_RESET, ctx->ip, ctx->port);
-  vprintf(fmt, args);
-  va_end(args);
-}
-
-static void client_error(client_context_t *ctx, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  printf(ANSI_BOLD ANSI_BRIGHT_RED "%s:%u error: " ANSI_RESET, ctx->ip,
-         ctx->port);
-  vprintf(fmt, args);
-  va_end(args);
-}
-
-static void client_perror(client_context_t *ctx, const char *s) {
-  fprintf(stderr, ANSI_BOLD ANSI_BRIGHT_RED "%s:%u %s: %s\n" ANSI_RESET,
-          ctx->ip, ctx->port, s, strerror(errno));
-}
-
 static int clients_add(client_context_t *ctx) {
   pthread_mutex_lock(&clients_mu);
 
@@ -60,7 +30,7 @@ static int clients_add(client_context_t *ctx) {
   while (clients[i]) {
     i++;
     if (i >= MAX_CLIENTS) {
-      client_error(ctx, "too many clients!\n");
+      log_err(LOG_CTX(ctx), "too many clients!\n");
       pthread_mutex_unlock(&clients_mu);
       return 1;
     }
@@ -90,7 +60,13 @@ static int clients_remove(int client_fd) {
   return 0;
 }
 
-static int broadcast(char *message, int exclude) {
+static int broadcast(int exclude, const char *fmt, ...) {
+  char buf[1152];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
   // copy values to prevent network blocking
   pthread_mutex_lock(&clients_mu);
   client_context_t ctxs[MAX_CLIENTS + 1];
@@ -102,46 +78,94 @@ static int broadcast(char *message, int exclude) {
   pthread_mutex_unlock(&clients_mu);
 
   for (int i = 0; i < count; i++) {
-    if (send_all(ctxs[i].client_fd, message)) {
-      client_error(&ctxs[i], "unable to receive message\n");
+    if (proto_send(ctxs[i].client_fd, 'm', buf) == -1) {
+      log_err(&(log_ctx_t){.ip = ctxs[i].ip, .port = ctxs[i].port},
+              "broadcast failed\n");
     }
   }
   return 0;
 }
 
+static bool client_handshake(client_io_t *io, char *name_out, size_t name_len) {
+  for (int attempts = 0; attempts < 3; attempts++) {
+    ssize_t n = io_prompt(io, ANSI_BOLD ANSI_BYELLOW
+                          "enter a display name: " ANSI_RESET);
+    if (n <= 0)
+      return false;
+
+    if (strlen(io->buf) == 0) {
+      if (io_message(io, "name cannot be empty, try again\n") == -1)
+        return false;
+      continue;
+    }
+    if (strlen(io->buf) >= name_len) {
+      if (io_message(io, "name too long (max %d chars), try again\n",
+                     name_len - 1) == -1)
+        return false;
+      continue;
+    }
+
+    strncpy(name_out, io->buf, name_len - 1);
+    name_out[name_len - 1] = '\0';
+    return true;
+  }
+
+  io_message(io, "too many failed attempts, disconnecting\n");
+  return false;
+}
+
 static void *handle_client(void *ctx_raw) {
-  client_context_t *ctx = (client_context_t *)ctx_raw;
-  clients_add(ctx);
-  client_log(ctx, "started on thread %p\n", (void *)pthread_self());
+  client_context_t *ctx = ctx_raw;
+  client_io_t io = {.fd = ctx->client_fd};
+  log_info(LOG_CTX(ctx), "started on thread %p\n", (void *)pthread_self());
 
-  char buf[1024];
+  char display_name[33];
+  if (!client_handshake(&io, display_name, sizeof(display_name))) {
+    log_info(LOG_CTX(ctx), "disconnected during handshake\n");
+    goto cleanup;
+  }
+
+  if (clients_add(ctx) != 0) {
+    io_message(&io, "server is full, please try again later\n");
+    log_info(LOG_CTX(ctx), "rejected (server full)\n");
+    goto cleanup;
+  }
+
+  log_info(LOG_CTX(ctx), "joined as '%s'\n", display_name);
+  broadcast(-1,
+            ANSI_BOLD ANSI_BCYAN "%s:%u " ANSI_RESET
+                                 "joined as " ANSI_BOLD ANSI_BMAGENTA
+                                 "%s" ANSI_RESET "\n",
+            ctx->ip, ctx->port, display_name);
+
   ssize_t bytes;
-  while ((bytes = recv(ctx->client_fd, buf, sizeof(buf) - 1, 0)) > 0) {
-    buf[bytes] = '\0';
-
-    client_log(ctx, "message: %s\n", buf);
-
-    char fmt_buf[1152];
-    snprintf(fmt_buf, sizeof(fmt_buf),
-             ANSI_BOLD ANSI_BRIGHT_MAGENTA "%s:%u " ANSI_RESET "%s\n", ctx->ip,
-             ctx->port, buf);
-    broadcast(fmt_buf, ctx->client_fd);
+  while ((bytes = io_prompt(&io, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET,
+                            display_name)) > 0) {
+    log_info(LOG_CTX(ctx), "message: %s\n", io.buf);
+    broadcast(ctx->client_fd, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET "%s\n",
+              display_name, io.buf);
   }
   if (bytes == -1) {
-    client_perror(ctx, "recv");
+    log_perror(LOG_CTX(ctx), "io_prompt");
   }
 
   clients_remove(ctx->client_fd);
+  broadcast(-1, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET "disconnected\n",
+            display_name);
+  log_info(LOG_CTX(ctx), "disconnected\n");
+
+cleanup:
   close(ctx->client_fd);
-  client_log(ctx, "connection closed\n");
   free(ctx);
   return NULL;
 }
 
 int server_start() {
+  signal(SIGPIPE, SIG_IGN);
+
   int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_fd == -1) {
-    perror("socket");
+    log_perror(NULL, "socket");
     return errno;
   }
 
@@ -149,7 +173,7 @@ int server_start() {
   int opt = 1;
   if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) ==
       -1) {
-    perror("setsockopt");
+    log_perror(NULL, "setsockopt");
     goto error;
   }
 
@@ -160,15 +184,15 @@ int server_start() {
       .sin_addr.s_addr = INADDR_ANY,
   };
   if (bind(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-    perror("bind");
+    log_perror(NULL, "bind");
     goto error;
   }
   if (listen(socket_fd, 10) == -1) {
-    perror("listen");
+    log_perror(NULL, "listen");
     goto error;
   }
 
-  main_log("started listening on port 8080\n");
+  log_info(NULL, "started listening on port 8080\n");
 
   while (true) {
     // accept with ip
@@ -180,34 +204,34 @@ int server_start() {
       // try again on signal interrupt
       if (errno == EINTR)
         continue;
-      perror("accept");
+      log_perror(NULL, "accept");
       goto error;
     }
 
     char client_ip[INET_ADDRSTRLEN];
     uint16_t client_port = ntohs(client_addr.sin_port);
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    main_log("accepted connection from %s:%u\n", client_ip, client_port);
+    log_info(NULL, "accepted connection from %s:%u\n", client_ip, client_port);
 
     // box information to pass into client handler
     client_context_t *ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-      perror("out of memory");
+      log_perror(NULL, "malloc");
       close(client_fd);
       goto error;
     }
     ctx->client_fd = client_fd;
     ctx->port = client_port;
-    memcpy(&ctx->ip, client_ip, sizeof(client_ip));
+    memcpy(ctx->ip, client_ip, sizeof(client_ip));
 
     pthread_t client_tid;
-    int pthread_err = pthread_create(&client_tid, NULL, handle_client, ctx);
-    if (pthread_err) {
-      fprintf(stderr, "pthread_create: %s\n", strerror(pthread_err));
+    int err = pthread_create(&client_tid, NULL, handle_client, ctx);
+    if (err) {
+      fprintf(stderr, "pthread_create: %s\n", strerror(err));
       free(ctx);
       close(client_fd);
       close(socket_fd);
-      return pthread_err;
+      return err;
     }
 
     // detaching will free its resources on its own
