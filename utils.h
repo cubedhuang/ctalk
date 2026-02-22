@@ -63,7 +63,7 @@ typedef struct {
   char buf[1024];
 } client_io_t;
 
-// Returns bytes read, 0 on close, -1 on error.
+// like recv, returns bytes read, 0 on close, -1 on error
 int io_message(client_io_t *io, const char *fmt, ...);
 ssize_t io_prompt(client_io_t *io, const char *fmt, ...);
 
