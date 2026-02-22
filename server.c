@@ -176,7 +176,8 @@ static const cmd_t cmds[] = {
 };
 
 static cmd_result_t cmd_help(client_io_t *io, client_ctx_t *) {
-  for (int i = 0; cmds[i].name; i++) {
+  size_t count = sizeof(cmds) / sizeof(cmds[0]);
+  for (size_t i = 0; i < count; i++) {
     io_message(
         io, ANSI_BOLD ANSI_BGREEN "    /%-8s" ANSI_RESET "  " ANSI_CYAN "%s\n",
         cmds[i].name, cmds[i].help);
