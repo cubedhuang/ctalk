@@ -175,16 +175,16 @@ static const cmd_t cmds[] = {
     {"quit", "disconnect", cmd_quit},
 };
 
-static cmd_result_t cmd_help(client_io_t *io, client_ctx_t *) {
+static cmd_result_t cmd_help(client_io_t *, client_ctx_t *) {
   size_t count = sizeof(cmds) / sizeof(cmds[0]);
   for (size_t i = 0; i < count; i++) {
-    io_message(
-        io, ANSI_BOLD ANSI_BGREEN "    /%-8s" ANSI_RESET "  " ANSI_CYAN "%s\n",
+    broadcast(
+        -1, ANSI_BOLD ANSI_BGREEN "    /%-8s" ANSI_RESET "  " ANSI_CYAN "%s\n",
         cmds[i].name, cmds[i].help);
   }
   return CMD_OK;
 }
-static cmd_result_t cmd_users(client_io_t *io, client_ctx_t *) {
+static cmd_result_t cmd_users(client_io_t *, client_ctx_t *) {
   client_ctx_t clients[MAX_CLIENTS];
   size_t count = clients_clone(clients, -1);
 
@@ -197,10 +197,10 @@ static cmd_result_t cmd_users(client_io_t *io, client_ctx_t *) {
   }
 
   for (size_t i = 0; i < count; i++) {
-    io_message(io,
-               ANSI_BOLD ANSI_GREEN "    %-*s" ANSI_RESET ANSI_CYAN
-                                    "  %s:%u\n" ANSI_RESET,
-               longest_name, clients[i].name, clients[i].ip, clients[i].port);
+    broadcast(-1,
+              ANSI_BOLD ANSI_GREEN "    %-*s" ANSI_RESET ANSI_CYAN
+                                   "  %s:%u\n" ANSI_RESET,
+              longest_name, clients[i].name, clients[i].ip, clients[i].port);
   }
   return CMD_OK;
 }
@@ -209,7 +209,8 @@ static cmd_result_t cmd_quit(client_io_t *, client_ctx_t *) { return CMD_QUIT; }
 static cmd_result_t handle_client_command(client_io_t *io, client_ctx_t *ctx) {
   char *cmd_str = strtok(io->buf + 1, " ");
   if (!cmd_str) {
-    io_message(io, ANSI_BOLD ANSI_BRED "error " ANSI_RESET "invalid command\n");
+    broadcast(ctx->fd,
+              ANSI_BOLD ANSI_BRED "error " ANSI_RESET "invalid command\n");
     return CMD_OK;
   }
 
@@ -219,7 +220,8 @@ static cmd_result_t handle_client_command(client_io_t *io, client_ctx_t *ctx) {
     }
   }
 
-  io_message(io, ANSI_BOLD ANSI_BRED "error " ANSI_RESET "unknown command\n");
+  broadcast(ctx->fd,
+            ANSI_BOLD ANSI_BRED "error " ANSI_RESET "unknown command\n");
   return CMD_OK;
 }
 
@@ -278,15 +280,13 @@ handshake_done:
   while ((bytes = io_prompt(&io, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET,
                             ctx->name)) > 0) {
     log_info(LOG_CTX(ctx), "message: %s\n", io.buf);
-
+    broadcast(ctx->fd, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET "%s\n",
+              ctx->name, io.buf);
     if (io.buf[0] == '/') {
       cmd_result_t result = handle_client_command(&io, ctx);
       if (result == CMD_QUIT) {
         break;
       }
-    } else {
-      broadcast(ctx->fd, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET "%s\n",
-                ctx->name, io.buf);
     }
   }
   if (bytes == -1) {
