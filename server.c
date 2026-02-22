@@ -198,8 +198,8 @@ static cmd_result_t cmd_users(client_io_t *io, client_ctx_t *) {
 
   for (size_t i = 0; i < count; i++) {
     io_message(io,
-               ANSI_BOLD ANSI_BBLACK "    %-*s" ANSI_RESET ANSI_CYAN
-                                     "  %s:%u\n" ANSI_RESET,
+               ANSI_BOLD ANSI_GREEN "    %-*s" ANSI_RESET ANSI_CYAN
+                                    "  %s:%u\n" ANSI_RESET,
                longest_name, clients[i].name, clients[i].ip, clients[i].port);
   }
   return CMD_OK;
