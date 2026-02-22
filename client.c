@@ -4,6 +4,8 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <readline/history.h>
+#include <readline/readline.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,19 +13,28 @@
 #include <unistd.h>
 
 #include "client.h"
-#include "prompt.h"
 #include "utils.h"
 
-static int socket_fd;
+static char *user_line = NULL;
+static bool user_ended = false;
 
-static int client_run() {
-  bool editing = false;
-  prompt_init();
+static void rl_handler(char *line) {
+  if (!line) {
+    user_ended = true;
+    return;
+  }
+  if (*line)
+    add_history(line);
+  user_line = line;
+}
 
+static int client_run(int socket_fd) {
   struct pollfd fds[2] = {
       {.fd = STDIN_FILENO, .events = POLLIN},
       {.fd = socket_fd, .events = POLLIN},
   };
+
+  bool editing = false;
 
   while (true) {
     if (poll(fds, 2, -1) == -1) {
@@ -38,14 +49,16 @@ static int client_run() {
       char header[9];
       if (recv_all(socket_fd, header, 9) <= 0) {
         printf("\r\nconnection closed\n");
-        prompt_cleanup();
+        if (editing)
+          rl_callback_handler_remove();
         return 0;
       }
 
       uint32_t magic = ntohl(*(uint32_t *)header);
       if (magic != PROTO_MAGIC) {
         printf("\r\nprotocol error: invalid magic number\n");
-        prompt_cleanup();
+        if (editing)
+          rl_callback_handler_remove();
         return 1;
       }
 
@@ -55,26 +68,35 @@ static int client_run() {
       char buf[1024];
       if (len >= sizeof(buf)) {
         printf("\r\nmessage too large\n");
-        prompt_cleanup();
+        if (editing)
+          rl_callback_handler_remove();
         return 1;
       }
       if (recv_all(socket_fd, buf, len) <= 0) {
         printf("\r\nconnection closed\n");
-        prompt_cleanup();
+        if (editing)
+          rl_callback_handler_remove();
         return 0;
       }
       buf[len] = '\0';
 
       if (type == 'm') {
-        if (editing)
-          prompt_hide();
-        write(STDOUT_FILENO, buf, strlen(buf));
-        if (editing)
-          prompt_show();
+        if (editing) {
+          write(STDOUT_FILENO, "\r\x1b[2K", 5);
+        }
+        fputs(buf, stdout);
+        if (editing) {
+          rl_forced_update_display();
+        }
+        fflush(stdout);
       } else if (type == 'p') {
-        prompt_set(buf);
-        prompt_show();
-        editing = true;
+        if (editing) {
+          rl_set_prompt(buf);
+          rl_forced_update_display();
+        } else {
+          rl_callback_handler_install(buf, rl_handler);
+          editing = true;
+        }
       }
     }
 
@@ -83,34 +105,33 @@ static int client_run() {
       if (!editing)
         continue;
 
-      char c;
-      if (read(STDIN_FILENO, &c, 1) <= 0)
-        continue;
+      rl_callback_read_char();
 
-      char *line = prompt_feed(c);
-      if (!line)
-        continue;
-
-      editing = false;
-
-      if (line == (char *)-1) {
+      if (user_ended) {
+        rl_callback_handler_remove();
         shutdown(socket_fd, SHUT_WR);
-        prompt_cleanup();
         return 0;
       }
 
-      uint32_t magic = htonl(PROTO_MAGIC);
-      uint32_t net_len = htonl((uint32_t)strlen(line));
-      send_all(socket_fd, (char *)&magic, 4);
-      send_all(socket_fd, (char *)&net_len, 4);
-      send_all(socket_fd, line, strlen(line));
+      if (user_line) {
+        editing = false;
+        rl_callback_handler_remove();
 
-      free(line);
+        uint32_t magic = htonl(PROTO_MAGIC);
+        uint32_t net_len = htonl((uint32_t)strlen(user_line));
+        send_all(socket_fd, (char *)&magic, 4);
+        send_all(socket_fd, (char *)&net_len, 4);
+        send_all(socket_fd, user_line, strlen(user_line));
+
+        free(user_line);
+        user_line = NULL;
+      }
     }
 
     // check for hangup
     if (fds[1].revents & (POLLHUP | POLLERR)) {
-      prompt_cleanup();
+      if (editing)
+        rl_callback_handler_remove();
       printf("\r\nconnection closed\n");
       return 0;
     }
@@ -129,7 +150,7 @@ int client_start(client_options_t options) {
     return 1;
   }
 
-  socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_fd == -1) {
     log_perror(NULL, "socket");
     return errno;
@@ -140,7 +161,7 @@ int client_start(client_options_t options) {
     return errno;
   }
 
-  int result = client_run();
+  int result = client_run(socket_fd);
   close(socket_fd);
   return result;
 }
