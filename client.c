@@ -1,12 +1,7 @@
 #include <arpa/inet.h>
-#include <assert.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <poll.h>
-#include <pthread.h>
-#include <readline/history.h>
 #include <readline/readline.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,8 +18,6 @@ static void rl_handler(char *line) {
     user_ended = true;
     return;
   }
-  if (*line)
-    add_history(line);
   user_line = line;
 }
 
