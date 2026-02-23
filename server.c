@@ -1,7 +1,6 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -54,24 +53,38 @@ static clients_add_result_t clients_add(client_ctx_t *ctx) {
   return CLIENTS_ADD_OK;
 }
 
-int clients_rename(int client_fd, const char *new_name) {
+typedef enum {
+  CLIENTS_RENAME_OK,
+  CLIENTS_RENAME_NOT_FOUND,
+  CLIENTS_RENAME_DUPLICATE,
+} clients_rename_result_t;
+
+static clients_rename_result_t clients_rename(int client_fd,
+                                              const char *new_name) {
   pthread_mutex_lock(&clients_mu);
 
   int i = 0;
+  int index = -1;
   while (clients[i]) {
     if (strcmp(clients[i]->name, new_name) == 0) {
       pthread_mutex_unlock(&clients_mu);
-      return 1;
+      return CLIENTS_RENAME_DUPLICATE;
     }
     if (clients[i]->fd == client_fd) {
-      strncpy(clients[i]->name, new_name, MAX_NAME_LEN);
-      clients[i]->name[MAX_NAME_LEN] = '\0';
+      index = i;
     }
     i++;
   }
 
+  if (index == -1) {
+    pthread_mutex_unlock(&clients_mu);
+    return CLIENTS_RENAME_NOT_FOUND;
+  }
+
+  strncpy(clients[index]->name, new_name, MAX_NAME_LEN);
+  clients[index]->name[MAX_NAME_LEN] = '\0';
   pthread_mutex_unlock(&clients_mu);
-  return 0;
+  return CLIENTS_RENAME_OK;
 }
 
 static int clients_remove(int client_fd) {
@@ -157,7 +170,8 @@ typedef enum {
   CMD_QUIT,
 } cmd_result_t;
 
-typedef cmd_result_t (*cmd_handler)(client_io_t *io, client_ctx_t *ctx);
+typedef cmd_result_t (*cmd_handler)(client_io_t *io, client_ctx_t *ctx,
+                                    char *args);
 
 typedef struct {
   const char *name;
@@ -165,17 +179,19 @@ typedef struct {
   cmd_handler handler;
 } cmd_t;
 
-static cmd_result_t cmd_help(client_io_t *io, client_ctx_t *ctx);
-static cmd_result_t cmd_users(client_io_t *io, client_ctx_t *ctx);
-static cmd_result_t cmd_quit(client_io_t *io, client_ctx_t *ctx);
+static cmd_result_t cmd_help(client_io_t *io, client_ctx_t *ctx, char *args);
+static cmd_result_t cmd_users(client_io_t *io, client_ctx_t *ctx, char *args);
+static cmd_result_t cmd_rename(client_io_t *io, client_ctx_t *ctx, char *args);
+static cmd_result_t cmd_quit(client_io_t *io, client_ctx_t *ctx, char *args);
 
 static const cmd_t cmds[] = {
     {"help", "show this menu", cmd_help},
     {"users", "list connected users", cmd_users},
+    {"rename", "change your display name", cmd_rename},
     {"quit", "disconnect", cmd_quit},
 };
 
-static cmd_result_t cmd_help(client_io_t *, client_ctx_t *) {
+static cmd_result_t cmd_help(client_io_t *, client_ctx_t *, char *) {
   size_t count = sizeof(cmds) / sizeof(cmds[0]);
   for (size_t i = 0; i < count; i++) {
     broadcast(
@@ -184,7 +200,7 @@ static cmd_result_t cmd_help(client_io_t *, client_ctx_t *) {
   }
   return CMD_OK;
 }
-static cmd_result_t cmd_users(client_io_t *, client_ctx_t *) {
+static cmd_result_t cmd_users(client_io_t *, client_ctx_t *, char *) {
   client_ctx_t clients[MAX_CLIENTS];
   size_t count = clients_clone(clients, -1);
 
@@ -204,24 +220,72 @@ static cmd_result_t cmd_users(client_io_t *, client_ctx_t *) {
   }
   return CMD_OK;
 }
-static cmd_result_t cmd_quit(client_io_t *, client_ctx_t *) { return CMD_QUIT; }
-
-static cmd_result_t handle_client_command(client_io_t *io, client_ctx_t *ctx) {
-  char *cmd_str = strtok(io->buf + 1, " ");
-  if (!cmd_str) {
-    broadcast(ctx->fd,
-              ANSI_BOLD ANSI_BRED "error " ANSI_RESET "invalid command\n");
+static cmd_result_t cmd_rename(client_io_t *, client_ctx_t *ctx, char *args) {
+  if (!args) {
+    broadcast(-1, ANSI_BOLD ANSI_BRED "error " ANSI_RESET "missing new name\n");
+    return CMD_OK;
+  }
+  if (strlen(args) == 0) {
+    broadcast(-1,
+              ANSI_BOLD ANSI_BRED "error " ANSI_RESET "name cannot be empty\n");
+    return CMD_OK;
+  }
+  if (strlen(args) > MAX_NAME_LEN) {
+    broadcast(-1,
+              ANSI_BOLD ANSI_BRED "error " ANSI_RESET
+                                  "name must be at most %d characters long\n",
+              MAX_NAME_LEN);
     return CMD_OK;
   }
 
-  for (int i = 0; cmds[i].name; i++) {
-    if (strcmp(cmd_str, cmds[i].name) == 0) {
-      return cmds[i].handler(io, ctx);
+  int err = clients_rename(ctx->fd, args);
+  if (err == CLIENTS_RENAME_NOT_FOUND) {
+    broadcast(-1, ANSI_BOLD ANSI_BRED
+              "error " ANSI_RESET "you are not registered, disconnecting\n");
+    return CMD_QUIT;
+  } else if (err == CLIENTS_RENAME_DUPLICATE) {
+    broadcast(-1,
+              ANSI_BOLD ANSI_BRED "error " ANSI_RESET "name already taken\n");
+    return CMD_OK;
+  }
+
+  broadcast(-1,
+            ANSI_BOLD ANSI_BCYAN "%s:%u " ANSI_RESET
+                                 "renamed to " ANSI_BOLD ANSI_BMAGENTA
+                                 "%s" ANSI_RESET "\n",
+            ctx->ip, ctx->port, ctx->name);
+
+  return CMD_OK;
+}
+static cmd_result_t cmd_quit(client_io_t *, client_ctx_t *, char *) {
+  return CMD_QUIT;
+}
+
+static cmd_result_t handle_client_command(client_io_t *io, client_ctx_t *ctx) {
+  char *input = io->buf + 1;
+  if (strlen(input) == 0) {
+    broadcast(-1, ANSI_BOLD ANSI_BRED "error " ANSI_RESET "empty command\n");
+    return CMD_OK;
+  }
+
+  char *args = strchr(input, ' ');
+  if (args) {
+    *args++ = '\0';
+  } else {
+    args = "";
+  }
+
+  size_t count = sizeof(cmds) / sizeof(cmds[0]);
+  for (size_t i = 0; i < count; i++) {
+    if (strcmp(cmds[i].name, input) == 0) {
+      return cmds[i].handler(io, ctx, args);
     }
   }
 
-  broadcast(ctx->fd,
-            ANSI_BOLD ANSI_BRED "error " ANSI_RESET "unknown command\n");
+  broadcast(-1,
+            ANSI_BOLD ANSI_BRED "error " ANSI_RESET
+                                "unknown command '%s', try /help\n",
+            input);
   return CMD_OK;
 }
 
@@ -294,8 +358,8 @@ handshake_done:
   }
 
   clients_remove(ctx->fd);
-  broadcast(-1, ANSI_BOLD ANSI_BMAGENTA "%s " ANSI_RESET "disconnected\n",
-            ctx->name);
+  broadcast(-1, ANSI_BOLD ANSI_BCYAN "%s:%u " ANSI_RESET "disconnected\n",
+            ctx->ip, ctx->port, ctx->name);
   log_info(LOG_CTX(ctx), "disconnected\n");
 
 cleanup:
@@ -369,17 +433,17 @@ int server_start() {
     memcpy(ctx->ip, client_ip, sizeof(client_ip));
 
     pthread_t client_tid;
-    int err = pthread_create(&client_tid, NULL, handle_client, ctx);
-    if (err) {
-      fprintf(stderr, "pthread_create: %s\n", strerror(err));
+    int create_err = pthread_create(&client_tid, NULL, handle_client, ctx);
+    if (create_err) {
+      fprintf(stderr, "pthread_create: %s\n", strerror(create_err));
       free(ctx);
       close(client_fd);
       close(socket_fd);
-      return err;
+      return create_err;
     }
 
-    // detaching will free its resources on its own
-    assert(pthread_detach(client_tid) == 0);
+    int detach_err = pthread_detach(client_tid);
+    assert(detach_err == 0);
   }
 
   close(socket_fd);
